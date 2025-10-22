@@ -1,9 +1,9 @@
 import os
 import re
+import time
 import random
 import requests
 from folder_structure import list_tree
-from bs4 import BeautifulSoup
 
 # wiki does not allow api calls w/o user agent
 user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
@@ -17,9 +17,10 @@ rootdir = "C:\\"
 
 folder = "repository"
 
-repository_names = ["History","Marketing", "Sales"]
+repository_names = ["Physics","History","Marketing", "Sales", "Technology"]
 
-random.seed(2)
+random.seed(1)
+errors = []
 #%%
 
 def get_category_members(category, cmtype="page|subcat", limit=50):
@@ -43,11 +44,19 @@ def get_category_members(category, cmtype="page|subcat", limit=50):
         "cmtype": cmtype,
         "format": "json"
     }
-    r = requests.get(url, params=params, headers=headers)
-    return r.json()["query"]["categorymembers"]
+    for i in range(10):
+        try:
+            r = requests.get(url, params=params, headers=headers)
+            return r.json()["query"]["categorymembers"]
+        except Exception as e:
+            errors.append(str(e) + str(i))
+            time.sleep(1)
+    return []
 
 base = 0.8
-max_depth = 5
+max_depth = 3
+downloaded_pages = set()
+visited_categories = set()
 def create_folders(root, folder, categories, recursion = -1):
     """
     recursively create nested folders
@@ -63,11 +72,17 @@ def create_folders(root, folder, categories, recursion = -1):
     if len(newroot) > 255:
         return
     
-    if not os.path.exists(newroot):
+    # retry 10 times to create folder
+    for i in range(10):
         try:
-            os.makedirs(newroot)
-        except:
-            return
+            os.makedirs(newroot, exist_ok = True)
+            break
+        except Exception as e:
+            errors.append(str(e) + str(i))
+            time.sleep(1)
+            continue
+
+    if not os.path.exists(newroot): return
     
     # if no new folder can be created, save pages
     if recursion > max_depth or random.random() > base**recursion or categories == []:
@@ -75,19 +90,31 @@ def create_folders(root, folder, categories, recursion = -1):
         
         for page in pages:
             title = page["title"]
-            filename = (newroot + parse_title(title))[:250] + "_.txt"
-            text = get_wiki_text_with_equations(title)
-            try:
-                with open(filename , "w", encoding="utf-8") as f:
-                    f.write(text)
-                    f.close()
-            except:
+            if title in downloaded_pages:
                 continue
+            downloaded_pages.add(title)
+            filename = (newroot + parse_title(title))[:250] + ".txt"
+            text = get_wiki_page(title)
+            
+            # retry 10 times to write file
+            for i in range(10):
+                try:
+                    with open(filename , "w", encoding="utf-8") as f:
+                        f.write(text)
+                        f.close()
+                        break
+                except Exception as e:
+                    errors.append(str(e) + str(i))
+                    time.sleep(1)
+                    continue
         return
 
     
     # otherwise create new folders
     for cat in categories:
+        if cat in visited_categories:
+            continue
+        visited_categories.add(cat)
         newcategories = get_category_members(cat, "subcat")
         titles = [c["title"].split("Category:")[-1] for c in newcategories]
         
@@ -98,43 +125,20 @@ def create_folders(root, folder, categories, recursion = -1):
         create_folders(newroot, cat, picked, recursion + 1)
         
         
-def get_wiki_text_with_equations(title):
-    """
-    Get Wikipedia page text as plain string, but preserve equations
-    using their original LaTeX ($...$).
-    
-    Parameters
-    ----------
-    title : title of page
-    """
-    url = "https://en.wikipedia.org/w/api.php"
-    params = {
-        "action": "parse",
-        "page": title,
-        "prop": "text",
-        "format": "json"
-    }
-    r = requests.get(url, params=params, headers= headers)
-    r.raise_for_status()
-    data = r.json()
-
-    # Parse HTML
-    html = data["parse"]["text"]["*"]
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Replace <math> with its original LaTeX (from <annotation>)
-    for m in soup.find_all("math"):
-        annotation = m.find("annotation", {"encoding": "application/x-tex"})
-        if annotation:
-            latex = annotation.get_text()
-            m.replace_with(f"${latex}$")
-        else:
-            # fallback: keep MathML text if no TeX source
-            m.replace_with(f"${m.get_text()}$")
-
-    # Extract plain text
-    text = soup.get_text()
-    return text
+def get_wiki_page(title):
+    """ 
+    for a given title, get page as string 
+    """ 
+    url = "https://en.wikipedia.org/w/api.php" 
+    params = { 
+        "action": "query", 
+        "prop": "extracts", 
+        "explaintext": True, 
+        "titles": title, 
+        "format": "json" } 
+    r = requests.get(url, params=params, headers=headers).json() 
+    page = next(iter(r["query"]["pages"].values())) 
+    return page.get("extract", "")
 
 
 def parse_title(title, replacement = "_"):
